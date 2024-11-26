@@ -1,151 +1,226 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
-import math
-from pathlib import Path
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# st.set_page_config(page_title="Time Series Dashboard", layout="centered")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# CSS untuk card
+card_css = """
+<style>
+.card {
+    background: #ffffff;
+    border-radius: 10px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+    width: 250px;
+    text-align: center;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 6px 10px rgba(0, 0, 0, 0.15);
+}
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+.card-title {
+    font-size: 18px;
+    font-weight: bold;
+    margin-bottom: 10px;
+    color: #333;
+}
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+.card-number {
+    font-weight: bold;
+    color: #009000;
+}
+</style>
+"""
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# HTML untuk card
+card_html = """
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-title">{title}</div>
+    <div class="card-number">{number}</div>
+</div>
+"""
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+# Load model TFLite
+@st.cache_resource
+def load_tflite_model(model_path):
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+    return interpreter
+
+
+# Fungsi scaling dan inverse scaling
+def scaled_price(data):
+    return data / 1000
+
+
+def inverse_scale(data):
+    return data * 1000
+
+
+# Fungsi prediksi 2 minggu dengan model TFLite
+def predict_2_weeks(actual, window_size, interpreter):
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    act_temp = actual.reshape(-1, 1).astype(
+        np.float32
+    )  # Pastikan data menggunakan FLOAT32
+    seq_res = np.array([])
+
+    for _ in range(2):  # Prediksi 2 minggu
+        actual_scaled = scaled_price(act_temp)
+        seq = actual_scaled[-window_size:]
+
+        interpreter.set_tensor(
+            input_details[0]["index"], seq.reshape(1, window_size, 1).astype(np.float32)
+        )
+        interpreter.invoke()
+
+        hasil = interpreter.get_tensor(output_details[0]["index"])
+        hasil = inverse_scale(hasil)
+
+        seq_res = np.append(seq_res, hasil.item())
+        act_temp = np.append(act_temp, np.expand_dims([hasil.item()], axis=1))
+
+    return seq_res
+
+
+# Fungsi untuk menampilkan hasil prediksi sebagai card
+def display_prediction(predictions):
+    # Pastikan predictions adalah iterable (list atau array)
+    if isinstance(predictions, np.ndarray):
+        predictions = predictions.tolist()  # Convert ndarray ke list jika perlu
+    elif isinstance(predictions, float):  # Jika hanya ada satu prediksi, ubah ke list
+        predictions = [predictions]
+
+    # Menampilkan setiap prediksi dalam card
+    for idx, pred in enumerate(predictions, 1):
+        # Streamlit app
+        st.markdown(card_css, unsafe_allow_html=True)
+        # Menampilkan card
+        st.markdown(
+            card_html.format(
+                title=f"Prediction week-{idx}",
+                number=f"Rp{pred-1000:.2f} - Rp{pred+1000:.2f}",
+            ),
+            unsafe_allow_html=True,
+        )
+
+
+# Fungsi untuk menampilkan chart dengan Plotly
+def display_chart(actual, predictions):
+    df = pd.DataFrame(
+        {
+            "Actual": np.concatenate([actual[-4:], np.nan * np.ones(2)]),
+            "Predictions": np.concatenate([np.nan * np.ones(3), actual[-1:], predictions]),
+        }
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Membuat grafik menggunakan Plotly
+    fig = go.Figure()
 
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+    # Garis untuk data aktual dengan warna biru
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["Actual"],
+            mode="lines",
+            name="Actual",
+            line=dict(color="blue"),
         )
+    )
+
+    # Memberikan layout untuk grafik
+    fig.update_layout(
+        title="Actual vs Predicted Data",
+        xaxis_title="Weeks",
+        yaxis_title="Value",
+        legend_title="Legend",
+        showlegend=True,
+    )
+
+    # Garis untuk data prediksi dengan warna merah
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["Predictions"],
+            mode="lines",
+            name="Predictions",
+            line=dict(color="red"),
+        )
+    )
+
+    # Menampilkan chart dengan Plotly
+    st.plotly_chart(fig)
+
+
+# Streamlit Dashboard
+st.title("Time Series Forecasting with TFLite")
+
+# Ganti bagian ini dengan pembacaan CSV dari direktori
+csv_file_path = "data/weekly_data.csv"
+data = pd.read_csv(csv_file_path)
+
+# Tampilkan data yang di-upload
+st.write("Data:", data.head())
+st.line_chart(data)
+
+# Pilih kolom data aktual
+column_name = "Harga/week"
+series = np.array(data[column_name])
+
+# Pilih ukuran window
+window_size = 24
+
+# Load model TFLite
+interpreter = load_tflite_model("model.tflite")
+
+# Inisialisasi data aktual di session_state jika belum ada
+if "actual" not in st.session_state:
+    st.session_state["actual"] = series  # Data awal dari file
+
+# Tampilkan data aktual saat ini
+st.write("Last 20 weeks Actual Data:")
+st.line_chart(st.session_state["actual"][-20:])
+
+# Prediksi 2 minggu pertama
+st.write("Predicted Data for Next 2 Weeks:")
+predictions = predict_2_weeks(st.session_state["actual"], window_size, interpreter)
+display_prediction(predictions)
+
+# Input 2 data aktual dari pengguna
+st.write("Please input 2 new actual data for further prediction:")
+actual_data_1 = st.number_input("Input 1st week:", min_value=0.0, key="input_1")
+actual_data_2 = st.number_input("Input 2nd week:", min_value=0.0, key="input_2")
+
+# Tombol untuk memulai prediksi 2 minggu berikutnya
+if st.button("Predict"):
+    if actual_data_1 > 0 and actual_data_2 > 0:
+        try:
+            # Tambahkan data aktual baru ke session_state
+            st.session_state["actual"] = np.append(
+                st.session_state["actual"], [actual_data_1, actual_data_2]
+            )
+
+            # Prediksi 2 minggu berikutnya
+            predictions = predict_2_weeks(
+                st.session_state["actual"], window_size, interpreter
+            )
+
+            # Tampilkan hasil prediksi
+            st.write("Predicted Data for Next 2 Weeks:")
+            display_prediction(predictions)
+            display_chart(st.session_state["actual"], predictions)
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+    else:
+        st.warning("Please input valid data points for prediction!")
